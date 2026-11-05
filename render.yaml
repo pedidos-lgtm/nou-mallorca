@@ -1,0 +1,32 @@
+# Propuesta pendiente de confirmar workspace, repositorio y coste.
+# No aplicar con datos reales antes de revisar docs/PENDIENTES.md.
+services:
+  - type: web
+    name: nou-mallorca
+    runtime: python
+    region: frankfurt
+    plan: 0.5c-512mb
+    numInstances: 1
+    autoDeployTrigger: "off"
+    buildCommand: pip install -r requirements.txt
+    startCommand: python scripts/serve.py
+    healthCheckPath: /healthz
+    disk:
+      name: nou-mallorca-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: DATA_DIR
+        value: /var/data/nou-mallorca
+      - key: SIGNATURE_ADAPTER
+        value: test
+      - key: MAIL_ADAPTER
+        value: test
+      - key: BOOTSTRAP_ADMIN_EMAIL
+        sync: false
+      - key: BOOTSTRAP_ADMIN_PASSWORD
+        generateValue: true

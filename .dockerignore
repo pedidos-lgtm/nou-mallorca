@@ -1,0 +1,11 @@
+.data
+.env
+.env.*
+!.env.example
+.git
+.venv
+__pycache__
+**/__pycache__
+backups
+*.nmbackup
+*.zip

@@ -1,0 +1,17 @@
+services:
+  app:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      APP_ENV: development
+      APP_URL: http://127.0.0.1:8000
+      COOKIE_SECURE: "false"
+      DATA_DIR: /data
+      SIGNATURE_ADAPTER: test
+      MAIL_ADAPTER: test
+    volumes:
+      - nm_data:/data
+    restart: unless-stopped
+volumes:
+  nm_data:

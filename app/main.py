@@ -12,6 +12,7 @@ from .files import validate_file, store, pdf_report, TestSignatureAdapter
 from .library import router as library_router
 from .document_state import reuse_trace,library_status
 from .bootstrap import bootstrap_admin
+from .imports import router as imports_router
 
 @asynccontextmanager
 async def lifespan(app):
@@ -27,6 +28,7 @@ async def lifespan(app):
     yield
 app=FastAPI(title='Nou Mallorca · Gestión de obras',lifespan=lifespan)
 app.include_router(library_router)
+app.include_router(imports_router)
 
 @app.middleware('http')
 async def security_headers(request,call_next):

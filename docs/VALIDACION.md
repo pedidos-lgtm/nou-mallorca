@@ -4,7 +4,7 @@ Fecha de ejecución: 5 de noviembre de 2026. Datos exclusivamente ficticios y ba
 
 ## Resultado
 
-52 pruebas de integración API y persistencia, ejecutadas con el runner de sandbox, más compilación Python y comprobación de sintaxis JavaScript. El runner usa el mismo TestClient y endpoints que la ejecución normal; solo añade sondeo de asyncio para compensar la limitación de despertar entre hilos del sandbox. No concede red ni cambia autorizaciones.
+62 pruebas de integración API y persistencia, ejecutadas con el runner de sandbox, más compilación Python y comprobación de sintaxis JavaScript. El runner usa el mismo TestClient y endpoints que la ejecución normal; solo añade sondeo de asyncio para compensar la limitación de despertar entre hilos del sandbox. No concede red ni cambia autorizaciones.
 
 ```bash
 python scripts/test_sandbox.py
@@ -51,4 +51,9 @@ No se ha probado un proveedor real de firma, SMTP, S3 ni PostgreSQL: no están i
 
 ## Preparación Render
 
-Cuatro pruebas adicionales: alta inicial única sin reinicializar usuarios/contraseñas, fallo seguro sin secretos válidos en producción, puerto asignado y directorio persistente requeridos, y health check público sin datos privados con 503 ante fallo de base. Las 52 pruebas han pasado. No verifican un despliegue real ni sustituyen validación oficial del Blueprint.
+Cuatro pruebas adicionales: alta inicial única sin reinicializar usuarios/contraseñas, fallo seguro sin secretos válidos en producción, puerto asignado y directorio persistente requeridos, y health check público sin datos privados con 503 ante fallo de base. Las 62 pruebas han pasado. No verifican un despliegue real ni sustituyen validación oficial del Blueprint.
+
+
+## Importación privada
+
+Se han comprobado códigos temporales sin acceso de lectura ni escalada, caducidad/revocación/cuotas, conservación exacta e idempotencia de originales, archivo laboral general exclusivo de administración, minimización de trabajadores sin crear usuarios ni asignaciones, destinos acotados y cierre de autorización al terminar. El análisis estructural rechaza JavaScript real y admite marcas de texto inocuas dentro de datos PDF. Los casos de prueba contienen exclusivamente datos ficticios.

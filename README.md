@@ -78,3 +78,8 @@ No hay publicación web confirmada, proveedor real de firma, SMTP, PostgreSQL ni
 ## Render
 
 Se incluyen un Blueprint propuesto y un arranque adaptado a Render. Ver [configuración y pasos pendientes](docs/RENDER.md). Repositorio previsto: https://github.com/pedidos-lgtm/nou-mallorca . Aún no está desplegado: faltan el espacio correcto de Render, validación remota y autorización de recursos de pago. El primer administrador puede inicializarse con variables seguras; no se crean demostraciones ni se imprimen contraseñas en el servicio.
+
+
+## Incorporar adjuntos desde el chat
+
+Administración puede abrir **Importar desde chat** y generar una autorización temporal y limitada al lote. Ver [funcionamiento y alcance](docs/IMPORTACION_DESDE_CHAT.md). Los adjuntos se incorporan al almacenamiento privado; no pasan por GitHub. El archivo general de empresa y el alta de trabajadores se mantienen separados de las obras.

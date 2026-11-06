@@ -358,7 +358,7 @@ class Acceptance(unittest.TestCase):
         with connect() as c:
             self.assertTrue(one(c,'SELECT id FROM versions WHERE id=?',(applied['version_id'],)))
             self.assertTrue(one(c,'SELECT id FROM company_library WHERE id=?',(lib['id'],)))
-            self.assertEqual([x['version'] for x in rows(c,'SELECT version FROM schema_migrations ORDER BY version')],[1,2,3,4])
+            self.assertEqual([x['version'] for x in rows(c,'SELECT version FROM schema_migrations ORDER BY version')],[1,2,3,4,5])
 
     def test_site_specific_company_document_cannot_enter_general_library(self):
         req=next(r for r in self.a.get('/api/projects/'+self.p).json()['requirements'] if r['company_id']==self.ca and 'adhesión al PSS' in r['name'])
@@ -415,5 +415,116 @@ class Acceptance(unittest.TestCase):
         with patch('app.main.connect',side_effect=RuntimeError('internal database detail')):
             failed=guest.get('/healthz');self.assertEqual(failed.status_code,503)
             self.assertEqual(failed.json(),{'status':'unavailable'})
+
+    def import_grant(self,max_files=18,max_workers=10,client=None):
+        return self.post('/imports/authorize',{'max_files':max_files,'max_workers':max_workers,'project_id':self.p,'company_id':self.ca},client or self.a)
+    def prepare_grant(self,grant):
+        return self.a.post('/api/imports/prepare',headers={'Authorization':'Bearer '+grant['code']},json={'company_name':'Empresa A ficticia','project':{'name':'Propuesta ficticia','code':'PROP','municipality':'Municipio ficticio','has_project':True}})
+    def upload_with_grant(self,grant,scope='project',category='prl',raw=None):
+        import hashlib
+        raw=raw or pdf_report('Adjunto ficticio',['Datos de prueba'])
+        return self.a.post('/api/imports/files',headers={'Authorization':'Bearer '+grant['code']},data={'metadata':js({'scope':scope,'category':category,'title':'Documento importado ficticio','sha256':hashlib.sha256(raw).hexdigest()})},files={'file':('ficticio.pdf',raw,'application/pdf')})
+    def test_import_authorization_requires_admin_csrf_and_token_has_no_read_access(self):
+        self.assertEqual(self.ea.post('/api/imports/authorize',json={'max_files':18}).status_code,403)
+        g=self.import_grant()
+        guest=TestClient(app);guest.headers['Authorization']='Bearer '+g['code']
+        self.assertEqual(guest.get('/api/dashboard').status_code,401)
+        self.assertEqual(guest.post('/api/projects',json={'name':'Escalada','code':'ESC'}).status_code,401)
+        self.assertEqual(guest.post('/api/imports/prepare',json={'company_name':'Empresa A ficticia'}).status_code,200)
+    def test_import_keeps_original_hash_pending_state_and_is_idempotent(self):
+        import hashlib
+        g=self.import_grant();self.assertEqual(self.prepare_grant(g).status_code,200)
+        raw=pdf_report('PDF original',['Ejemplo ficticio'])
+        first=self.upload_with_grant(g,raw=raw);self.assertEqual(first.status_code,200,first.text)
+        second=self.upload_with_grant(g,raw=raw);self.assertEqual(second.status_code,200);self.assertTrue(second.json()['already_imported'])
+        with connect() as c:
+            v=one(c,'SELECT * FROM versions WHERE id=?',(first.json()['version_id'],))
+            self.assertEqual(v['hash'],hashlib.sha256(raw).hexdigest());self.assertEqual(v['status'],'recibido')
+            self.assertEqual((FILES/v['storage_key']).read_bytes(),raw)
+            self.assertFalse(one(c,'SELECT id FROM signature_requests WHERE version_id=?',(v['id'],)))
+    def test_import_revocation_expiry_disabled_owner_and_quota_enforced(self):
+        g=self.import_grant(max_files=1);self.prepare_grant(g)
+        self.assertEqual(self.upload_with_grant(g,raw=pdf_report('Primero',['A'])).status_code,200)
+        self.assertEqual(self.upload_with_grant(g,raw=pdf_report('Segundo',['B'])).status_code,409)
+        self.post('/imports/'+g['id']+'/revoke',{},self.a)
+        self.assertEqual(self.upload_with_grant(g).status_code,410)
+        g2=self.import_grant()
+        with connect() as c:c.execute("UPDATE import_authorizations SET expires='2000' WHERE id=?",(g2['id'],))
+        self.assertEqual(self.upload_with_grant(g2).status_code,410)
+        g3=self.import_grant()
+        with connect() as c:c.execute('UPDATE users SET disabled=1 WHERE id=?',(self.admin,))
+        self.assertEqual(self.upload_with_grant(g3).status_code,403)
+    def test_company_hours_archive_is_not_assigned_to_work_or_visible_to_externals(self):
+        g=self.import_grant();self.prepare_grant(g)
+        uploaded=self.upload_with_grant(g,scope='company',category='laboral')
+        self.assertEqual(uploaded.status_code,200,uploaded.text)
+        with connect() as c:
+            self.assertIsNone(one(c,'SELECT id FROM documents WHERE id=?',(uploaded.json()['id'],)))
+            d=one(c,'SELECT * FROM company_archive_documents WHERE id=?',(uploaded.json()['id'],));self.assertEqual(d['company_id'],self.ca)
+        self.assertEqual(self.ea.get('/api/company-archive/'+self.ca).status_code,403)
+        self.assertEqual(self.ea.get('/api/company-archive/versions/'+uploaded.json()['version_id']+'/file').status_code,403)
+        self.assertEqual(self.a.get('/api/company-archive/versions/'+uploaded.json()['version_id']+'/file').status_code,200)
+    def test_worker_import_is_minimized_no_accounts_no_work_assignments(self):
+        g=self.import_grant();self.prepare_grant(g)
+        row={'name':'Persona Ficticia','trade':'Oficio de prueba','email':'worker@example.test','phone':'000000000','active':True,'source_row':2}
+        request=lambda value:self.a.post('/api/imports/workers',headers={'Authorization':'Bearer '+g['code']},json={'workers':value})
+        imported=request([row]);self.assertEqual(imported.status_code,200,imported.text)
+        again=request([row]);self.assertTrue(again.json()['workers'][0]['already_imported'])
+        with connect() as c:
+            w=one(c,'SELECT * FROM workers WHERE name=?',(row['name'],));self.assertEqual(w['company_id'],self.ca)
+            self.assertEqual(c.execute('SELECT COUNT(*) FROM worker_assignments').fetchone()[0],0)
+            self.assertIsNone(one(c,'SELECT id FROM users WHERE email=?',(row['email'],)))
+        self.assertEqual(request([{**row,'dni':'NO-IMPORTAR'}]).status_code,422)
+        self.assertEqual(request([{**row,'permissions':['admin']}]).status_code,422)
+    def test_import_worker_cap_and_prepare_new_project_are_bounded(self):
+        g=self.post('/imports/authorize',{'max_files':18,'max_workers':1},self.a)
+        body={'company_name':'Empresa nueva ficticia','project':{'name':'Obra nueva ficticia','code':'NEW-IMPORT','municipality':'Municipio ficticio','has_project':True,'proposal':{'review':'Pendiente de confirmar'}}}
+        headers={'Authorization':'Bearer '+g['code']}
+        p=self.a.post('/api/imports/prepare',headers=headers,json=body);self.assertEqual(p.status_code,200,p.text)
+        again=self.a.post('/api/imports/prepare',headers=headers,json={**body,'project':{**body['project'],'code':'SHOULD-NOT-CREATE'}})
+        self.assertEqual(again.json()['project_id'],p.json()['project_id'])
+        self.assertEqual(self.a.post('/api/imports/workers',headers=headers,json={'workers':[{'name':'Uno ficticio'}]}).status_code,200)
+        self.assertEqual(self.a.post('/api/imports/workers',headers=headers,json={'workers':[{'name':'Dos ficticio'}]}).status_code,409)
+        with connect() as c:
+            self.assertIsNone(one(c,"SELECT id FROM projects WHERE code='SHOULD-NOT-CREATE'"))
+            self.assertTrue(json.loads(one(c,'SELECT details FROM projects WHERE id=?',(p.json()['project_id'],))['details'])['import_pending_confirmation'])
+    def test_pdf_random_marker_bytes_do_not_reject_signed_original_but_javascript_is_blocked(self):
+        from app.files import validate_file
+        from pypdf import PdfReader,PdfWriter
+        base=pdf_report('Original ficticio',['Prueba'])+b'\n% bytes /JS /AA inside a non-executable comment\n'
+        actual,_,_=validate_file(base,'ficticio.pdf',True);self.assertEqual(actual,base)
+        writer=PdfWriter();writer.add_blank_page(width=100,height=100);writer.add_js('app.alert("test")');buf=io.BytesIO();writer.write(buf)
+        with self.assertRaises(Exception):validate_file(buf.getvalue(),'activo.pdf',True)
+
+    def test_import_finish_closes_token_and_cannot_be_used_again(self):
+        g=self.import_grant();self.prepare_grant(g)
+        headers={'Authorization':'Bearer '+g['code']}
+        self.assertEqual(self.upload_with_grant(g).status_code,200)
+        finished=self.a.post('/api/imports/finish',headers=headers,json={})
+        self.assertEqual(finished.status_code,200);self.assertEqual(finished.json()['documents'],1)
+        self.assertTrue(finished.json()['authorization_closed'])
+        self.assertEqual(self.upload_with_grant(g).status_code,410)
+        self.assertEqual(self.a.post('/api/imports/workers',headers=headers,json={'workers':[{'name':'Persona ficticia'}]}).status_code,410)
+    def test_import_selected_company_mismatch_and_health_categories_are_rejected(self):
+        g=self.import_grant(max_workers=0)
+        mismatch=self.a.post('/api/imports/prepare',headers={'Authorization':'Bearer '+g['code']},json={'company_name':'Otra empresa ficticia'})
+        self.assertEqual(mismatch.status_code,409)
+        self.assertEqual(self.upload_with_grant(g,category='salud').status_code,422)
+        self.assertEqual(self.a.post('/api/imports/workers',headers={'Authorization':'Bearer '+g['code']},json={'workers':[{'name':'Sin permiso'}]}).status_code,403)
+
+    def test_import_document_links_to_requirement_without_validating_and_blank_form_is_not_evidence(self):
+        import hashlib
+        g=self.import_grant();self.prepare_grant(g)
+        raw=pdf_report('PSS ficticio',['Pendiente de revisión'])
+        metadata={'scope':'project','category':'prl','title':'PSS ficticio','sha256':hashlib.sha256(raw).hexdigest(),'requirement_name':'Plan de seguridad y salud','details':{'source_class':'documento_aportado'}}
+        headers={'Authorization':'Bearer '+g['code']}
+        r=self.a.post('/api/imports/files',headers=headers,data={'metadata':js(metadata)},files={'file':('ficticio.pdf',raw,'application/pdf')})
+        self.assertEqual(r.status_code,200,r.text)
+        with connect() as c:
+            d=one(c,'SELECT * FROM documents WHERE id=?',(r.json()['id'],));self.assertIsNotNone(d['requirement_id'])
+            self.assertEqual(one(c,'SELECT status FROM versions WHERE id=?',(r.json()['version_id'],))['status'],'recibido')
+        raw2=pdf_report('Modelo ficticio',['Sin cumplimentar']);metadata['sha256']=hashlib.sha256(raw2).hexdigest();metadata['details']['source_class']='formulario_pendiente_cumplimentar'
+        rejected=self.a.post('/api/imports/files',headers=headers,data={'metadata':js(metadata)},files={'file':('modelo.pdf',raw2,'application/pdf')})
+        self.assertEqual(rejected.status_code,422)
 
 if __name__=='__main__': unittest.main(verbosity=2)

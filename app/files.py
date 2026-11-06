@@ -34,9 +34,8 @@ def validate_file(content,filename,preserve_original=False):
         try:
             r=PdfReader(io.BytesIO(content),strict=True)
             if r.is_encrypted or len(r.pages)>500: fail(422,'PDF cifrado o más de 500 páginas.')
-            # Reject active payloads anywhere in serialized objects, not just catalog.
-            forbidden=[b'/JavaScript',b'/JS',b'/Launch',b'/EmbeddedFile',b'/RichMedia',b'/OpenAction',b'/AA',b'/XFA']
-            if any(x in content for x in forbidden): fail(422,'El PDF contiene elementos activos o adjuntos no admitidos.')
+            # Parse PDF object names instead of scanning compressed stream bytes.
+            # Raw /JS or /AA substrings can occur innocently inside fonts or images.
             reject_active_pdf(r)
             if preserve_original: return content,'application/pdf','.pdf'
             # Rewrite parsed pages to strip catalog metadata and non-page payloads.

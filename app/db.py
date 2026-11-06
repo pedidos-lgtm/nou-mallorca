@@ -29,6 +29,8 @@ def migrate():
         c.execute('INSERT OR IGNORE INTO schema_migrations VALUES(3,?)',(now(),))
         c.executescript((ROOT/'migrations/004_task_comments.sql').read_text())
         c.execute('INSERT OR IGNORE INTO schema_migrations VALUES(4,?)',(now(),))
+        c.executescript((ROOT/'migrations/005_private_imports.sql').read_text())
+        c.execute('INSERT OR IGNORE INTO schema_migrations VALUES(5,?)',(now(),))
 
 def rows(c,sql,args=()): return [dict(r) for r in c.execute(sql,args).fetchall()]
 def one(c,sql,args=()):

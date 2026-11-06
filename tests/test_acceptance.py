@@ -358,7 +358,7 @@ class Acceptance(unittest.TestCase):
         with connect() as c:
             self.assertTrue(one(c,'SELECT id FROM versions WHERE id=?',(applied['version_id'],)))
             self.assertTrue(one(c,'SELECT id FROM company_library WHERE id=?',(lib['id'],)))
-            self.assertEqual([x['version'] for x in rows(c,'SELECT version FROM schema_migrations ORDER BY version')],[1,2,3,4,5])
+            self.assertEqual([x['version'] for x in rows(c,'SELECT version FROM schema_migrations ORDER BY version')],[1,2,3,4,5,6])
 
     def test_site_specific_company_document_cannot_enter_general_library(self):
         req=next(r for r in self.a.get('/api/projects/'+self.p).json()['requirements'] if r['company_id']==self.ca and 'adhesión al PSS' in r['name'])
@@ -526,5 +526,83 @@ class Acceptance(unittest.TestCase):
         raw2=pdf_report('Modelo ficticio',['Sin cumplimentar']);metadata['sha256']=hashlib.sha256(raw2).hexdigest();metadata['details']['source_class']='formulario_pendiente_cumplimentar'
         rejected=self.a.post('/api/imports/files',headers=headers,data={'metadata':js(metadata)},files={'file':('modelo.pdf',raw2,'application/pdf')})
         self.assertEqual(rejected.status_code,422)
+
+
+    def test_existing_people_assignment_is_scoped_and_idempotent(self):
+        with connect() as c:
+            wid=uid();insert(c,'workers',id=wid,company_id=self.ca,name='Trabajador importado ficticio',trade='',details='{}')
+        path='/people/workers/'+wid+'/assign'
+        self.assertEqual(self.eb.post('/api'+path,json={'project_id':self.p}).status_code,403)
+        self.assertNotIn('already_assigned',self.post(path,{'project_id':self.p},self.ea))
+        self.assertTrue(self.post(path,{'project_id':self.p},self.ea)['already_assigned'])
+        with connect() as c:self.assertEqual(c.execute('SELECT COUNT(*) FROM worker_assignments WHERE worker_id=?',(wid,)).fetchone()[0],1)
+        p2=self.post('/projects',{'name':'Otra obra ficticia','code':'QA2','has_project':False},self.a)['id']
+        self.assertNotEqual(self.a.post('/api'+path,json={'project_id':p2}).status_code,200)
+
+    def test_completed_signature_cannot_be_cancelled(self):
+        doc=self.upload(self.ca);s=self.signature(doc['version_id']);self.sign(s)
+        self.assertEqual(self.a.post('/api/signatures/'+s['id']+'/cancel').status_code,409)
+        token=s['links'][0]['link'].split('/')[-1]
+        self.assertEqual(self.ea.get('/api/sign/'+token).status_code,200)
+
+    def test_password_change_revokes_sessions_and_checks_current_password(self):
+        b={'current_password':'Incorrecta-123456','new_password':'Nueva-segura-123456','confirm_password':'Nueva-segura-123456'}
+        self.assertEqual(self.ea.post('/api/account/password',json=b).status_code,403)
+        b['current_password']='Password-test-1234'
+        self.post('/account/password',b,self.ea)
+        self.assertEqual(self.ea.get('/api/me').status_code,401)
+        guest=TestClient(app)
+        self.assertEqual(guest.post('/api/login',json={'email':'a@example.test','password':b['new_password']}).status_code,200)
+        self.assertEqual(guest.post('/api/login',json={'email':'a@example.test','password':b['current_password']}).status_code,401)
+
+    def test_blank_project_name_rejected(self):
+        self.assertEqual(self.a.post('/api/projects',json={'name':'   ','code':'BLANK'}).status_code,422)
+
+    def test_restricted_critical_requirement_still_blocks_operational_view(self):
+        self.add_user('foreman-qa@example.test','encargado');f=self.client('foreman-qa@example.test')
+        with connect() as c:
+            r=one(c,'SELECT * FROM requirements WHERE project_id=? LIMIT 1',(self.p,))
+            c.execute("UPDATE requirements SET category='salud',name='CONFIDENCIAL-QA',applicability='aplica',blocking=1 WHERE id=?",(r['id'],))
+        h=f.get('/api/dashboard').json()['projects'][0]['health']
+        self.assertEqual(h['color'],'rojo');self.assertNotIn('CONFIDENCIAL-QA',json.dumps(h))
+
+
+    def supplier_grant(self,maximum=3):
+        g=self.post('/imports/authorize',{'max_suppliers':maximum},self.a)
+        guest=TestClient(app);guest.headers['Authorization']='Bearer '+g['code'];return guest
+
+    def supplier_batch(self):
+        return {'source_sha256':'a'*64,'suppliers':[{'name':'Proveedor ficticio QA','tax_id':'TEST-FISCAL','payment_restricted':'CUENTA-FICTICIA-PRIVADA','company_notes':'NM2022 / BADOM','source_row':9}]}
+
+    def test_supplier_import_is_private_unassigned_and_idempotent(self):
+        guest=self.supplier_grant();b=self.supplier_batch()
+        first=guest.post('/api/imports/suppliers',json=b);self.assertEqual(first.status_code,200,first.text)
+        cid=first.json()['results'][0]['company_id'];self.assertEqual(first.json()['created'],1)
+        self.assertEqual(guest.post('/api/imports/suppliers',json=b).json()['created'],0)
+        dashboard=self.a.get('/api/dashboard');self.assertNotIn('CUENTA-FICTICIA-PRIVADA',dashboard.text);self.assertNotIn('TEST-FISCAL',dashboard.text)
+        self.assertEqual(self.eb.get('/api/suppliers/'+cid+'/private').status_code,403)
+        self.assertEqual(guest.get('/api/suppliers/'+cid+'/private').status_code,401)
+        self.assertEqual(self.a.get('/api/suppliers/'+cid+'/private').json()['payment'],'CUENTA-FICTICIA-PRIVADA')
+        with connect() as c:
+            self.assertIsNone(one(c,'SELECT id FROM participations WHERE company_id=?',(cid,)))
+            self.assertIsNone(one(c,'SELECT id FROM grants WHERE company_id=?',(cid,)))
+            self.assertEqual(one(c,'SELECT kind FROM companies WHERE id=?',(cid,))['kind'],'pendiente_definir')
+
+    def test_supplier_quota_and_old_grant_cannot_import(self):
+        g=self.import_grant();guest=TestClient(app);guest.headers['Authorization']='Bearer '+g['code']
+        self.assertEqual(guest.post('/api/imports/suppliers',json=self.supplier_batch()).status_code,403)
+        guest=self.supplier_grant(1);b=self.supplier_batch();b['suppliers'].append({**b['suppliers'][0],'name':'Segundo ficticio','source_row':10})
+        self.assertEqual(guest.post('/api/imports/suppliers',json=b).status_code,403)
+        with connect() as c:self.assertEqual(c.execute('SELECT COUNT(*) FROM supplier_private').fetchone()[0],0)
+
+    def test_supplier_repeated_tax_id_keeps_distinct_records_and_names_never_overwrite(self):
+        guest=self.supplier_grant();b=self.supplier_batch();b['suppliers'].append({**b['suppliers'][0],'name':'Segundo ficticio','source_row':10})
+        r=guest.post('/api/imports/suppliers',json=b);self.assertEqual(r.status_code,200,r.text)
+        self.assertEqual(r.json()['created'],2)
+        for record in r.json()['results']:
+            self.assertTrue(self.a.get('/api/suppliers/'+record['company_id']+'/private').json()['tax_id_repeated_review'])
+        b['source_sha256']='b'*64;b['suppliers']=b['suppliers'][:1]
+        r=guest.post('/api/imports/suppliers',json=b)
+        self.assertEqual(r.json()['created'],0);self.assertEqual(r.json()['results'][0]['status'],'coincidencia_nombre_revisar')
 
 if __name__=='__main__': unittest.main(verbosity=2)

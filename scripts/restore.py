@@ -26,6 +26,8 @@ def restore(archive,destination):
         if c.execute('PRAGMA foreign_key_check').fetchall(): raise ValueError('Referencias inconsistentes.')
         # Revocation of all authentication/bearer tokens after restore prevents replay.
         c.execute('DELETE FROM sessions');c.execute('UPDATE invitations SET revoked=1');c.execute('UPDATE signers SET revoked=1')
+        if c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='import_authorizations'").fetchone():
+            c.execute("UPDATE import_authorizations SET revoked_at=COALESCE(revoked_at,datetime('now'))")
     return len(verified)
 if __name__=='__main__':
     if len(sys.argv)!=3: raise SystemExit('Uso: python scripts/restore.py copia.nmbackup /destino/nuevo')

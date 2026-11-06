@@ -31,6 +31,10 @@ def migrate():
         c.execute('INSERT OR IGNORE INTO schema_migrations VALUES(4,?)',(now(),))
         c.executescript((ROOT/'migrations/005_private_imports.sql').read_text())
         c.execute('INSERT OR IGNORE INTO schema_migrations VALUES(5,?)',(now(),))
+        if 'max_suppliers' not in [r[1] for r in c.execute('PRAGMA table_info(import_authorizations)')]:
+            c.execute('ALTER TABLE import_authorizations ADD COLUMN max_suppliers INTEGER NOT NULL DEFAULT 0')
+        c.executescript((ROOT/'migrations/006_supplier_imports.sql').read_text())
+        c.execute('INSERT OR IGNORE INTO schema_migrations VALUES(6,?)',(now(),))
 
 def rows(c,sql,args=()): return [dict(r) for r in c.execute(sql,args).fetchall()]
 def one(c,sql,args=()):

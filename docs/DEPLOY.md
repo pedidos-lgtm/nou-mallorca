@@ -1,6 +1,6 @@
 # Despliegue de la V1 y operación
 
-La V1 es una aplicación ASGI con SQLite y disco privado. No se ha desplegado ni se ha contratado ningún servicio. El entorno de desarrollo actual no permite descargar paquetes ni abrir un servidor visible de forma verificada. No usar los datos demo para expedientes reales.
+La V1 es una aplicación ASGI con SQLite y disco privado. Existe un despliegue aprobado en Render: https://nou-mallorca-atsw.onrender.com, con disco persistente privado y una instancia. Las instrucciones Linux siguientes son una alternativa de despliegue. No usar los datos demo para expedientes reales.
 
 ## Servidor HTTPS
 

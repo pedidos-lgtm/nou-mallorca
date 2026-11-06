@@ -48,7 +48,13 @@ def body_text(b,key,required=True,maxlen=1000):
         if required: fail(422,'Falta el campo: '+key)
         return None
     if not isinstance(v,str) or len(v)>maxlen: fail(422,'Campo no válido: '+key)
-    return v.strip()
+    value=v.strip()
+    if required and not value:fail(422,'Falta el campo: '+key)
+    return value
+def password_value(b,key):
+    value=b.get(key)
+    if not isinstance(value,str) or not value or len(value)>256:fail(422,'Contraseña no válida.')
+    return value
 def valid_date(v):
     if not v: return None
     try: return date.fromisoformat(v).isoformat()
@@ -83,7 +89,7 @@ def public_user(u): return {k:u[k] for k in ['id','email','name','admin','csrf']
 
 @app.post('/api/login')
 async def login(request:Request):
-    b=await request.json(); email=body_text(b,'email').lower(); pw=body_text(b,'password',maxlen=256)
+    b=await request.json(); email=body_text(b,'email').lower(); pw=password_value(b,'password')
     key=digest((request.client.host if request.client else '')+email)
     with connect() as c:
         a=one(c,'SELECT * FROM login_attempts WHERE key=?',(key,))
@@ -135,6 +141,8 @@ def dashboard(request:Request):
                     signatures.append(s)
             alerts += [a for a in rows(c,'SELECT * FROM alerts WHERE project_id=?',(p['id'],)) if allowed(c,u,p['id'],'read',a['company_id'],a['category'])]
         companies=[x for x in rows(c,'SELECT * FROM companies') if u['admin'] or any(allowed(c,u,p['id'],'read',x['id'],'prl') and one(c,'SELECT id FROM participations WHERE company_id=? AND project_id=?',(x['id'],p['id'])) for p in projects)]
+        for company in companies:
+            company['project_ids']=[p['id'] for p in projects if one(c,'SELECT id FROM participations WHERE project_id=? AND company_id=?',(p['id'],company['id']))]
         workers=[];equipment=[]
         for table,assignment,key,dest in [('workers','worker_assignments','worker_id',workers),('equipment','equipment_assignments','equipment_id',equipment)]:
             for e in rows(c,f'SELECT * FROM {table}'):
@@ -210,6 +218,9 @@ async def company_create(request:Request):
         cid=b.get('company_id')
         if cid:
             if not one(c,'SELECT id FROM companies WHERE id=?',(cid,)): fail(404,'Empresa no encontrada.')
+            if one(c,'SELECT kind FROM companies WHERE id=?',(cid,))['kind']=='pendiente_definir':
+                c.execute('UPDATE companies SET kind=? WHERE id=?',(kind,cid))
+                audit(c,u['id'],pid,'clasificacion_proveedor_confirmada',cid,{'kind':kind},cid)
         else:
             cid=uid();insert(c,'companies',id=cid,name=body_text(b,'name'),kind=kind,details=js(b.get('details',{})))
         if one(c,'SELECT id FROM participations WHERE project_id=? AND company_id=?',(pid,cid)): fail(409,'La empresa ya participa en esta obra.')
@@ -348,7 +359,7 @@ async def accept_invite(token:str,request:Request):
             if u['id']!=existing['id']: fail(403,'Inicia sesión con el correo invitado para aceptar.')
             user_id=existing['id']
         else:
-            user_id=uid();insert(c,'users',id=user_id,email=i['email'],name=i['name'],password=password_hash(body_text(b,'password',maxlen=256)))
+            user_id=uid();insert(c,'users',id=user_id,email=i['email'],name=i['name'],password=password_hash(password_value(b,'password')))
         # Reaccepting does not silently replace existing grants.
         c.execute('DELETE FROM grants WHERE user_id=? AND project_id=? AND company_id IS ?',(user_id,i['project_id'],i['company_id']))
         insert(c,'grants',id=uid(),user_id=user_id,project_id=i['project_id'],company_id=i['company_id'],role=i['role'],categories=i['categories'],permissions=i['permissions'])
@@ -436,6 +447,7 @@ async def signature_manage(sid:str,action:str,request:Request):
         if not sr: fail(404,'Solicitud no encontrada.')
         v,d=get_version(c,sr['version_id']);require(c,u,d['project_id'],'manage',d['company_id'],d['category'])
         if action=='cancel':
+            if sr['status']=='completada':fail(409,'Una firma completada conserva su resultado y no se puede cancelar. Crea una nueva solicitud si necesitas otro trámite.')
             c.execute("UPDATE signature_requests SET status='cancelada' WHERE id=? AND status!='completada'",(sid,));c.execute('UPDATE signers SET revoked=1 WHERE request_id=?',(sid,))
         elif action=='confirm-sent': audit(c,u['id'],d['project_id'],'envio_confirmado_usuario',sid,{'delivery_verified':False},d['company_id'])
         elif action=='remind':
@@ -473,7 +485,7 @@ async def update_task(tid:str,request:Request):
     with connect() as c:
         u=user(c,request,True);t=one(c,'SELECT * FROM tasks WHERE id=?',(tid,))
         if not t: fail(404,'Tarea no encontrada.')
-        require(c,u,t['project_id'],'manage',t['company_id'])
+        require(c,u,t['project_id'],'manage',t['company_id'],task_category(c,t))
         if 'status' in b:
             if b['status'] not in ['pendiente','en_curso','esperando_tercero','completada','cancelada']: fail(422,'Estado no válido.')
             if b['status']=='completada' and one(c,"SELECT d.task_id FROM dependencies d JOIN tasks t ON t.id=d.depends_on WHERE d.task_id=? AND t.status!='completada'",(tid,)): fail(409,'Hay dependencias pendientes.')
@@ -655,3 +667,32 @@ def healthz():
         return {'status':'ok'}
     except Exception:
         return JSONResponse({'status':'unavailable'},status_code=503)
+
+@app.post('/api/people/{kind}/{ident}/assign')
+async def assign_existing(kind:str,ident:str,request:Request):
+    if kind not in ['workers','equipment']:fail(404,'Tipo no válido.')
+    b=await request.json();pid=body_text(b,'project_id')
+    with connect() as c:
+        c.execute('BEGIN IMMEDIATE');u=user(c,request,True)
+        entity=one(c,f'SELECT * FROM {kind} WHERE id=?',(ident,))
+        if not entity:fail(404,'Ficha no encontrada.')
+        cid=entity['company_id'];require(c,u,pid,'upload',cid,'prl');related_company(c,pid,cid)
+        table='worker_assignments' if kind=='workers' else 'equipment_assignments'
+        key='worker_id' if kind=='workers' else 'equipment_id'
+        if one(c,f'SELECT {key} FROM {table} WHERE {key}=? AND project_id=?',(ident,pid)):
+            return {'ok':True,'already_assigned':True}
+        insert(c,table,**{key:ident,'project_id':pid});generate(c,pid)
+        audit(c,u['id'],pid,'asignacion_existente_'+kind,ident,company=cid)
+        return {'ok':True,'project_id':pid,'id':ident,'notice':'Asignación registrada; los requisitos documentales deben revisarse.'}
+
+@app.post('/api/account/password')
+async def change_password(request:Request):
+    b=await request.json()
+    with connect() as c:
+        u=user(c,request,True);stored=one(c,'SELECT password FROM users WHERE id=?',(u['id'],))
+        if not password_ok(password_value(b,'current_password'),stored['password']):fail(403,'La contraseña actual no es correcta.')
+        new=password_value(b,'new_password')
+        if new!=b.get('confirm_password'):fail(422,'La confirmación no coincide.')
+        c.execute('UPDATE users SET password=? WHERE id=?',(password_hash(new),u['id']))
+        c.execute('DELETE FROM sessions WHERE user_id=?',(u['id'],));audit(c,u['id'],None,'contrasena_modificada_sesiones_revocadas')
+    response=JSONResponse({'ok':True,'notice':'Contraseña actualizada. Inicia sesión de nuevo.'});response.delete_cookie('nm_session');return response

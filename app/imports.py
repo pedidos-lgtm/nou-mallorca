@@ -33,6 +33,8 @@ async def authorize(request:Request):
         u=user(c,request,True);require_admin(u)
         maximum=b.get('max_files',18)
         max_workers=b.get('max_workers',0)
+        max_suppliers=b.get('max_suppliers',0)
+        if type(max_suppliers)!=int or not 0<=max_suppliers<=500:fail(422,'Límite de proveedores no válido.')
         if type(max_workers)!=int or not 0<=max_workers<=500:fail(422,'Límite de trabajadores no válido.')
         if type(maximum)!=int or not 1<=maximum<=50:fail(422,'Selecciona entre 1 y 50 archivos.')
         pid=b.get('project_id') or None;cid=b.get('company_id') or None
@@ -40,9 +42,9 @@ async def authorize(request:Request):
         if cid and not one(c,'SELECT id FROM companies WHERE id=?',(cid,)):fail(404,'Empresa no encontrada.')
         token='nm_import_'+secrets.token_urlsafe(32);ident=uid()
         expires=(datetime.now(timezone.utc)+timedelta(hours=1)).isoformat()
-        insert(c,'import_authorizations',id=ident,token_hash=digest(token),user_id=u['id'],project_id=pid,company_id=cid,expires=expires,max_files=maximum,max_workers=max_workers,created_at=now())
-        audit(c,u['id'],pid,'importacion_temporal_autorizada',ident,{'max_files':maximum,'max_workers':max_workers,'company_id':cid,'expires':expires})
-        return {'id':ident,'code':token,'expires':expires,'max_files':maximum,'max_workers':max_workers}
+        insert(c,'import_authorizations',id=ident,token_hash=digest(token),user_id=u['id'],project_id=pid,company_id=cid,expires=expires,max_files=maximum,max_workers=max_workers,max_suppliers=max_suppliers,created_at=now())
+        audit(c,u['id'],pid,'importacion_temporal_autorizada',ident,{'max_files':maximum,'max_workers':max_workers,'max_suppliers':max_suppliers,'company_id':cid,'expires':expires})
+        return {'id':ident,'code':token,'expires':expires,'max_files':maximum,'max_workers':max_workers,'max_suppliers':max_suppliers}
 
 @router.post('/imports/{ident}/revoke')
 def revoke(ident:str,request:Request):
@@ -189,3 +191,54 @@ def finish(request:Request):
         c.execute('UPDATE import_authorizations SET revoked_at=? WHERE id=?',(now(),g['id']))
         audit(c,u['id'],g['project_id'],'importacion_completada_y_revocada',g['id'],{'documents':documents,'workers':workers},g['company_id'])
         return {'documents':documents,'workers':workers,'authorization_closed':True,'project_id':g['project_id'],'company_id':g['company_id']}
+
+@router.post('/imports/suppliers')
+async def import_suppliers(request:Request):
+    """Bounded write-only delegation. Never grants access or creates participations."""
+    b=await request.json();items=b.get('suppliers');source_hash=text(b,'source_sha256',limit=64)
+    if len(source_hash)!=64 or any(ch not in '0123456789abcdef' for ch in source_hash):fail(422,'Hash de origen no válido.')
+    if not isinstance(items,list) or not 1<=len(items)<=500:fail(422,'Lote no válido.')
+    cleaned=[]
+    for item in items:
+        if not isinstance(item,dict):fail(422,'Ficha no válida.')
+        row=item.get('source_row')
+        if type(row)!=int or row<1:fail(422,'Fila de origen no válida.')
+        values={key:(text(item,key,required=key=='name',limit=2000) or '') for key in ['name','tax_id','email_source','phone','payment_restricted','address','activity','company_notes']}
+        fingerprint=hashlib.sha256(js({'source':source_hash,'row':row,'values':values}).encode()).hexdigest()
+        cleaned.append((row,values,fingerprint))
+    with connect() as c:
+        c.execute('BEGIN IMMEDIATE');g,u=delegated(c,request)
+        used=c.execute('SELECT COUNT(*) FROM imported_suppliers WHERE authorization_id=?',(g['id'],)).fetchone()[0]
+        fresh={fp for _,_,fp in cleaned if not one(c,'SELECT id FROM imported_suppliers WHERE fingerprint=?',(fp,))}
+        if not g['max_suppliers'] or used+len(fresh)>g['max_suppliers']:fail(403,'Este lote supera la autorización de proveedores.')
+        results=[]
+        normalize=lambda v:''.join(ch for ch in v.casefold() if ch.isalnum())
+        for row,v,fp in cleaned:
+            prior=one(c,'SELECT company_id FROM imported_suppliers WHERE fingerprint=?',(fp,))
+            if prior:
+                results.append({'row':row,'status':'ya_importado','company_id':prior['company_id']});continue
+            match=next((x for x in rows(c,'SELECT id,name FROM companies') if normalize(x['name'])==normalize(v['name'])),None)
+            if match:
+                # Do not overwrite an existing record or attach banking data by guesswork.
+                results.append({'row':row,'status':'coincidencia_nombre_revisar','company_id':match['id']});continue
+            cid=uid();tax=normalize(v['tax_id'])
+            repeated=bool(tax and any(normalize(x['tax_id'])==tax for x in rows(c,'SELECT tax_id FROM supplier_private')))
+            insert(c,'companies',id=cid,name=v['name'],kind='pendiente_definir',details=js({'email':v['email_source'],'phone':v['phone'],'address':v['address'],'activity':v['activity'],'origin':'registro_proveedores','pending_confirmation':True}))
+            insert(c,'supplier_private',company_id=cid,tax_id=v['tax_id'],payment=v['payment_restricted'],notes=v['company_notes'],source_hash=source_hash,source_row=row,created_by=u['id'],created_at=now())
+            insert(c,'imported_suppliers',id=uid(),authorization_id=g['id'],company_id=cid,fingerprint=fp,created_at=now())
+            results.append({'row':row,'status':'creado','company_id':cid,'tax_id_repeated_review':repeated})
+        audit(c,u['id'],None,'proveedores_importados',g['id'],{'created':sum(r['status']=='creado' for r in results),'rows':[r['row'] for r in results]})
+        return {'results':results,'created':sum(r['status']=='creado' for r in results),'notice':'Sin cuentas, obras, homologación ni habilitación automática. Clasificación pendiente de definir.'}
+
+@router.get('/suppliers/{cid}/private')
+def supplier_private(cid:str,request:Request):
+    with connect() as c:
+        u=user(c,request);require_admin(u)
+        record=one(c,'SELECT * FROM supplier_private WHERE company_id=?',(cid,))
+        if not record:fail(404,'No hay ficha de proveedor importada.')
+        repeated=False
+        if record['tax_id']:
+            normalize=lambda v:''.join(ch for ch in v.casefold() if ch.isalnum())
+            repeated=sum(normalize(x['tax_id'])==normalize(record['tax_id']) for x in rows(c,'SELECT tax_id FROM supplier_private'))>1
+        audit(c,u['id'],None,'consulta_datos_privados_proveedor',cid)
+        return {**record,'tax_id_repeated_review':repeated}

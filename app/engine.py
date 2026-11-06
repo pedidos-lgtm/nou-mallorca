@@ -2,7 +2,7 @@
 import json
 from datetime import date, timedelta
 from .db import *
-from .security import allowed
+from .security import allowed,grants
 from .document_state import base_status,effective_version_status
 PHASES=['Preparación y toma de datos','Proyecto, licencias y permisos','Preparación del inicio y PRL','En ejecución','Remates y documentación final','Pendiente de cierre','Cerrada']
 CATEGORIES={'prl':'PRL y coordinación','proyecto':'Proyecto y planos','licencias':'Licencias y permisos','actas':'Actas e incidencias','calidad':'Calidad y certificados','final':'Final de obra','fotografias':'Fotografías','otros':'Otros documentos','salud':'Conclusiones de aptitud (restringido)','laboral':'Administrativa laboral (restringido)','economico':'Documentación económica','bancario':'Datos bancarios'}
@@ -72,6 +72,12 @@ def visible_requirements(c,u,pid):
 
 def health(c,u,p):
     reqs=visible_requirements(c,u,p['id']); causes=[]; state='verde'
+    global_operational=u['admin'] or any(g['company_id'] is None and g['role'] in ['gestor','encargado'] and 'read' in json.loads(g['permissions']) for g in grants(c,u,p['id']))
+    if global_operational:
+        reqs=[]
+        for r in rows(c,'SELECT * FROM requirements WHERE project_id=?',(p['id'],)):
+            visible=allowed(c,u,p['id'],'read',r['company_id'],r['category'])
+            reqs.append({**r,'name':r['name'] if visible else 'Requisito de acceso restringido','effective_status':req_status(c,r)})
     unresolved=p['has_project'] is None
     for r in reqs:
         if r['effective_status']=='no_aplicable': continue
